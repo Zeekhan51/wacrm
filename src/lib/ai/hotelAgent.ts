@@ -7,18 +7,19 @@ import { engineSendText } from '@/lib/flows/meta-send'
 import { checkRateLimit, RATE_LIMITS } from '@/lib/rate-limit'
 
 // ============================================================
-// Hotel AI Agent — OpenRouter tool-calling loop.
+// Hotel AI Agent — Google Gemini tool-calling loop.
 //
-// Calls the OpenRouter chat completions endpoint (OpenAI-
-// compatible) with function/tool definitions. Executes tool
-// calls server-side and feeds results back until the model
-// produces a final text reply.
+// Calls Google AI Studio's OpenAI-compatible chat completions
+// endpoint with function/tool definitions. Executes tool calls
+// server-side and feeds results back until the model produces a
+// final text reply.
 // ============================================================
 
-const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions'
+const GEMINI_URL =
+  'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions'
 const MAX_TOOL_ROUNDS = 10
 
-// --- OpenRouter message shapes (extends the existing ChatMessage) ---
+// --- Gemini message shapes (OpenAI-compatible format) ---
 
 interface ToolCall {
   id: string
@@ -315,9 +316,9 @@ async function getOrderStatus(
   return { content: 'Please provide either an order_id or a phone number to look up orders.' }
 }
 
-// --- OpenRouter chat completion call ---
+// --- Gemini chat completion call ---
 
-interface OpenRouterChoice {
+interface GeminiChoice {
   message: {
     role: string
     content: string | null
@@ -326,8 +327,8 @@ interface OpenRouterChoice {
   finish_reason: string
 }
 
-interface OpenRouterResponse {
-  choices?: OpenRouterChoice[]
+interface GeminiResponse {
+  choices?: GeminiChoice[]
   usage?: {
     prompt_tokens?: number
     completion_tokens?: number
@@ -335,23 +336,21 @@ interface OpenRouterResponse {
   }
 }
 
-async function callOpenRouter(
+async function callGemini(
   messages: OrMessage[],
   tools: typeof HOTEL_TOOLS,
-): Promise<OpenRouterChoice['message'] & { finish_reason: string }> {
-  const apiKey = process.env.OPENROUTER_API_KEY
-  if (!apiKey) throw new Error('OPENROUTER_API_KEY is not set')
+): Promise<GeminiChoice['message'] & { finish_reason: string }> {
+  const apiKey = process.env.GEMINI_API_KEY
+  if (!apiKey) throw new Error('GEMINI_API_KEY is not set')
 
-  const model = process.env.AI_MODEL || 'anthropic/claude-sonnet-4.5'
+  const model = process.env.AI_MODEL || 'gemini-2.0-flash'
   const timeoutMs = Number(process.env.AI_REQUEST_TIMEOUT_MS) || 30_000
 
-  const res = await fetch(OPENROUTER_URL, {
+  const res = await fetch(GEMINI_URL, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
-      'HTTP-Referer': process.env.NEXT_PUBLIC_SITE_URL || 'https://wacrm.local',
-      'X-Title': 'Hotel AI Agent',
     },
     body: JSON.stringify({
       model,
@@ -370,13 +369,13 @@ async function callOpenRouter(
     } catch {
       // Non-JSON
     }
-    throw new Error(`OpenRouter API error (${res.status}): ${detail || res.statusText}`)
+    throw new Error(`Gemini API error (${res.status}): ${detail || res.statusText}`)
   }
 
-  const data = (await res.json()) as OpenRouterResponse
+  const data = (await res.json()) as GeminiResponse
   const choice = data.choices?.[0]
   if (!choice) {
-    throw new Error('OpenRouter returned no choices')
+    throw new Error('Gemini returned no choices')
   }
 
   return { ...choice.message, finish_reason: choice.finish_reason }
@@ -426,7 +425,7 @@ export async function runHotelAgent(
 
   // Tool-use loop
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-    const response = await callOpenRouter(messages, HOTEL_TOOLS)
+    const response = await callGemini(messages, HOTEL_TOOLS)
 
     // If no tool calls, we have the final reply
     if (!response.tool_calls || response.tool_calls.length === 0) {
