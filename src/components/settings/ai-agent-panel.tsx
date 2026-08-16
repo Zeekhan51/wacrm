@@ -39,7 +39,7 @@ export function AiAgentPanel() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [systemPrompt, setSystemPrompt] = useState('');
-  const [hotelAgentEnabled, setHotelAgentEnabled] = useState(false);
+  const [isEnabled, setIsEnabled] = useState(false);
   const [isDefaultPrompt, setIsDefaultPrompt] = useState(true);
 
   const loadedAccountIdRef = useRef<string | null>(null);
@@ -47,21 +47,25 @@ export function AiAgentPanel() {
   const fetchConfig = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch('/api/ai/config');
+      const res = await fetch('/api/hotel-agent/config');
       const data = await res.json();
       if (!res.ok) {
-        toast.error(data.error ?? 'Failed to load AI configuration');
+        toast.error(data.error ?? 'Failed to load hotel agent configuration');
         return;
       }
       if (data.configured) {
         const prompt = data.system_prompt ?? '';
         setSystemPrompt(prompt);
+        setIsEnabled(data.is_enabled ?? false);
         setIsDefaultPrompt(!prompt || prompt === HOTEL_AGENT_DEFAULT_PROMPT);
+      } else {
+        // No config row yet — show defaults
+        setSystemPrompt('');
+        setIsEnabled(false);
+        setIsDefaultPrompt(true);
       }
-      // Check env-based hotel agent status
-      setHotelAgentEnabled(process.env.NEXT_PUBLIC_HOTEL_AI_ENABLED === 'true');
     } catch {
-      toast.error('Failed to load AI configuration');
+      toast.error('Failed to load hotel agent configuration');
     } finally {
       setLoading(false);
     }
@@ -76,18 +80,20 @@ export function AiAgentPanel() {
   const handleSave = async () => {
     setSaving(true);
     try {
-      const res = await fetch('/api/ai/config', {
-        method: 'POST',
+      const res = await fetch('/api/hotel-agent/config', {
+        method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           system_prompt: systemPrompt.trim() || null,
+          is_enabled: isEnabled,
         }),
       });
       const data = await res.json();
       if (res.ok) {
-        toast.success('AI Agent settings saved');
+        toast.success('Hotel agent settings saved');
         setIsDefaultPrompt(
-          !systemPrompt.trim() || systemPrompt.trim() === HOTEL_AGENT_DEFAULT_PROMPT,
+          !systemPrompt.trim() ||
+            systemPrompt.trim() === HOTEL_AGENT_DEFAULT_PROMPT,
         );
       } else {
         toast.error(data.error ?? 'Failed to save');
@@ -96,6 +102,29 @@ export function AiAgentPanel() {
       toast.error('Failed to save');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleToggleEnabled = async (checked: boolean) => {
+    setIsEnabled(checked);
+    // Save immediately on toggle so the state is persisted
+    try {
+      const res = await fetch('/api/hotel-agent/config', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ is_enabled: checked }),
+      });
+      if (res.ok) {
+        toast.success(checked ? 'Hotel agent enabled' : 'Hotel agent disabled');
+      } else {
+        // Revert on failure
+        setIsEnabled(!checked);
+        const data = await res.json();
+        toast.error(data.error ?? 'Failed to toggle');
+      }
+    } catch {
+      setIsEnabled(!checked);
+      toast.error('Failed to toggle');
     }
   };
 
@@ -128,16 +157,48 @@ export function AiAgentPanel() {
       )}
 
       <div className="space-y-6">
+        {/* Enable / Disable toggle */}
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
-              <Bot className="h-4 w-4 text-primary" /> System Prompt
+              <Bot className="h-4 w-4 text-primary" /> Hotel Agent
             </CardTitle>
             <CardDescription>
-              This prompt defines how the AI agent behaves when talking to guests.
-              Edit it to match your hotel&apos;s tone, policies, and menu style.
-              The agent will always look up real menu items via tools — it never
-              invents prices or dishes.
+              Turn the hotel agent on or off. When enabled, incoming WhatsApp
+              messages that aren&apos;t handled by a flow or a human agent will
+              be answered by the AI.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="flex items-center justify-between gap-4 rounded-md border border-border p-3">
+              <div>
+                <p className="text-sm font-medium text-foreground">
+                  {isEnabled ? 'Agent is active' : 'Agent is disabled'}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {isEnabled
+                    ? 'The AI agent will respond to guest messages in eligible conversations.'
+                    : 'Turn on to let the AI agent handle guest food ordering.'}
+                </p>
+              </div>
+              <Switch
+                checked={isEnabled}
+                onCheckedChange={handleToggleEnabled}
+                disabled={!canEdit}
+              />
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* System prompt */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">System Prompt</CardTitle>
+            <CardDescription>
+              This prompt defines how the AI agent behaves when talking to
+              guests. Edit it to match your hotel&apos;s tone, policies, and
+              menu style. The agent will always look up real menu items via
+              tools &mdash; it never invents prices or dishes.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -166,36 +227,6 @@ export function AiAgentPanel() {
               >
                 Reset to Default
               </Button>
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Status</CardTitle>
-            <CardDescription>
-              The hotel AI agent is enabled via the{" "}
-              <code className="rounded bg-muted px-1 py-0.5 text-xs">
-                HOTEL_AI_ENABLED
-              </code>{" "}
-              environment variable. Set it to{" "}
-              <code className="rounded bg-muted px-1 py-0.5 text-xs">true</code>{" "}
-              in your Vercel deployment to activate the agent.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="flex items-center justify-between gap-4 rounded-md border border-border p-3">
-              <div>
-                <p className="text-sm font-medium text-foreground">
-                  Hotel Agent Feature
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  {hotelAgentEnabled
-                    ? 'Enabled — the hotel agent is active and will respond to guest messages.'
-                    : 'Disabled — set HOTEL_AI_ENABLED=true in your environment to enable.'}
-                </p>
-              </div>
-              <Switch checked={hotelAgentEnabled} disabled />
             </div>
           </CardContent>
         </Card>

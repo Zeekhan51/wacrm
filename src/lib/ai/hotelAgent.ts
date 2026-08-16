@@ -395,36 +395,41 @@ interface HotelAgentResult {
 }
 
 /**
- * Fetch the hotel agent system prompt for this account from the
- * database. Falls back to the hardcoded default when no prompt is
- * configured or the ai_configs row doesn't exist.
+ * Fetch the hotel agent config for this account from the dedicated
+ * hotel_agent_configs table. Returns the system prompt and whether
+ * the agent is enabled. Falls back to the hardcoded default prompt
+ * when no prompt is configured.
  */
-async function fetchSystemPrompt(
+async function fetchHotelAgentConfig(
   db: SupabaseClient,
   accountId: string,
-): Promise<string> {
+): Promise<{ systemPrompt: string; isEnabled: boolean }> {
   try {
     const { data } = await db
-      .from('ai_configs')
-      .select('system_prompt')
+      .from('hotel_agent_configs')
+      .select('system_prompt, is_enabled')
       .eq('account_id', accountId)
       .maybeSingle()
 
-    if (data?.system_prompt && data.system_prompt.trim()) {
-      return data.system_prompt.trim()
+    if (data) {
+      return {
+        systemPrompt: data.system_prompt?.trim() || HOTEL_SYSTEM_PROMPT,
+        isEnabled: data.is_enabled ?? false,
+      }
     }
   } catch (err) {
-    console.error('[hotel agent] failed to fetch system prompt:', err)
+    console.error('[hotel agent] failed to fetch config:', err)
   }
-  return HOTEL_SYSTEM_PROMPT
+  return { systemPrompt: HOTEL_SYSTEM_PROMPT, isEnabled: false }
 }
 
 /**
  * Run the hotel AI agent for an inbound message.
  *
  * Loads conversation history + the account's system prompt from the
- * database, sends to Gemini with tool definitions, executes tool
- * calls server-side, and returns the final natural-language reply.
+ * dedicated hotel_agent_configs table, sends to Gemini with tool
+ * definitions, executes tool calls server-side, and returns the
+ * final natural-language reply.
  */
 export async function runHotelAgent(
   args: HotelAgentArgs,
@@ -432,8 +437,8 @@ export async function runHotelAgent(
   const { accountId, conversationId, contactId } = args
   const db = supabaseAdmin()
 
-  // Fetch the account-specific system prompt from ai_configs
-  const systemPrompt = await fetchSystemPrompt(db, accountId)
+  // Fetch the account-specific config from hotel_agent_configs
+  const { systemPrompt } = await fetchHotelAgentConfig(db, accountId)
 
   // Build conversation context (last N text messages)
   const contextMessages = await buildConversationContext(
@@ -504,10 +509,22 @@ export async function runHotelAgent(
 
 /**
  * Check whether the hotel agent feature is enabled for this account.
- * Controlled by the HOTEL_AI_ENABLED env var (global toggle).
+ * Reads from the hotel_agent_configs table (the is_enabled column).
  */
-export function isHotelAgentEnabled(): boolean {
-  return process.env.HOTEL_AI_ENABLED === 'true'
+async function isHotelAgentEnabled(
+  db: SupabaseClient,
+  accountId: string,
+): Promise<boolean> {
+  try {
+    const { data } = await db
+      .from('hotel_agent_configs')
+      .select('is_enabled')
+      .eq('account_id', accountId)
+      .maybeSingle()
+    return data?.is_enabled ?? false
+  } catch {
+    return false
+  }
 }
 
 // --- Webhook dispatch (mirrors dispatchInboundToAiReply) ---
@@ -523,12 +540,12 @@ interface DispatchArgs {
  * Hotel AI agent for a freshly-arrived inbound message.
  *
  * Invoked from the WhatsApp webhook's `after()` block, only when
- * no deterministic flow consumed the message and HOTEL_AI_ENABLED=true.
- * Mirrors the auto-reply bot's contract: owns its try/catch and
- * NEVER throws.
+ * no deterministic flow consumed the message and the hotel agent
+ * is enabled in the hotel_agent_configs table. Mirrors the
+ * auto-reply bot's contract: owns its try/catch and NEVER throws.
  *
  * Eligibility gates (any → silent no-op):
- *   - HOTEL_AI_ENABLED is not "true"
+ *   - hotel agent is not enabled for this account (is_enabled=false or no row)
  *   - a human agent is assigned
  *   - auto-reply was disabled for this conversation (prior handoff)
  *   - there's nothing to reply to
@@ -539,9 +556,10 @@ export async function dispatchInboundToHotelAgent(
   const { accountId, conversationId, contactId, configOwnerUserId } = args
 
   try {
-    if (!isHotelAgentEnabled()) return
-
     const db = supabaseAdmin()
+
+    // Check if the hotel agent is enabled for this account
+    if (!(await isHotelAgentEnabled(db, accountId))) return
 
     const { data: conv, error: convErr } = await db
       .from('conversations')

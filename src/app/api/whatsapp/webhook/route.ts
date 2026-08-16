@@ -856,13 +856,20 @@ async function processMessage(
   // AI auto-reply. Runs only for plain-text inbound the deterministic
   // flow runner did NOT consume (flows win over the LLM), and only when
   // the account has enabled it. Awaited inside `after()` (same reason as
-  // the webhook dispatch below); `dispatchInboundToAiReply` owns its
-  // eligibility gates + try/catch and never throws.
+  // the webhook dispatch below); each dispatcher owns its eligibility
+  // gates + try/catch and never throws.
   //
-  // When HOTEL_AI_ENABLED=true, the hotel agent (tool-calling via
-  // OpenRouter) takes over instead of the standard BYO-key auto-reply.
+  // The hotel agent checks is_enabled from hotel_agent_configs. If
+  // enabled for this account it handles the message. Otherwise the
+  // standard BYO-key auto-reply runs as fallback.
   if (!flowConsumed && !interactiveReplyId && inboundText.trim()) {
-    if (process.env.HOTEL_AI_ENABLED === 'true') {
+    const { data: haConfig } = await supabaseAdmin()
+      .from('hotel_agent_configs')
+      .select('is_enabled')
+      .eq('account_id', accountId)
+      .maybeSingle()
+
+    if (haConfig?.is_enabled) {
       await dispatchInboundToHotelAgent({
         accountId,
         conversationId: conversation.id,
