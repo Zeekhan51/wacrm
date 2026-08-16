@@ -42,13 +42,13 @@ const HOTEL_TOOLS = [
     function: {
       name: 'get_menu',
       description:
-        'Retrieve the hotel food menu. Optionally filter by category. Returns items with id, name, description, price, category, and availability.',
+        'Search the hotel food menu by keyword. Pass a search term to find items by name or category (e.g. "pizza" finds "Chicken Pizza" under "Pizza & Wraps"). Omit to get the full menu. Returns items with id, name, description, price, category, and availability.',
       parameters: {
         type: 'object',
         properties: {
-          category: {
+          search: {
             type: 'string',
-            description: 'Optional category filter (e.g. "Starters", "Drinks", "Desserts"). Omit to get all items.',
+            description: 'Optional keyword to search item names and categories (case-insensitive partial match). E.g. "pizza", "drinks", "chicken". Omit to get all items.',
           },
         },
         required: [],
@@ -124,7 +124,7 @@ async function executeTool(
   try {
     switch (name) {
       case 'get_menu':
-        return await getMenu(db, accountId, args.category as string | undefined)
+        return await getMenu(db, accountId, args.search as string | undefined)
       case 'create_order':
         return await createOrder(db, accountId, contactId, conversationId, args)
       case 'get_order_status':
@@ -141,7 +141,7 @@ async function executeTool(
 async function getMenu(
   db: SupabaseClient,
   accountId: string,
-  category?: string,
+  search?: string,
 ): Promise<ToolResult> {
   let query = db
     .from('menu_items')
@@ -150,8 +150,9 @@ async function getMenu(
     .order('category')
     .order('name')
 
-  if (category) {
-    query = query.ilike('category', category)
+  if (search) {
+    const pattern = `%${search}%`
+    query = query.or(`name.ilike.${pattern},category.ilike.${pattern}`)
   }
 
   const { data, error } = await query
@@ -159,8 +160,8 @@ async function getMenu(
 
   if (!data || data.length === 0) {
     return {
-      content: category
-        ? `No menu items found in category "${category}".`
+      content: search
+        ? `No menu items found matching "${search}".`
         : 'The menu is currently empty. Please ask an administrator to add items.',
     }
   }
