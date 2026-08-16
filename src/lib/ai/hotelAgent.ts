@@ -395,17 +395,45 @@ interface HotelAgentResult {
 }
 
 /**
+ * Fetch the hotel agent system prompt for this account from the
+ * database. Falls back to the hardcoded default when no prompt is
+ * configured or the ai_configs row doesn't exist.
+ */
+async function fetchSystemPrompt(
+  db: SupabaseClient,
+  accountId: string,
+): Promise<string> {
+  try {
+    const { data } = await db
+      .from('ai_configs')
+      .select('system_prompt')
+      .eq('account_id', accountId)
+      .maybeSingle()
+
+    if (data?.system_prompt && data.system_prompt.trim()) {
+      return data.system_prompt.trim()
+    }
+  } catch (err) {
+    console.error('[hotel agent] failed to fetch system prompt:', err)
+  }
+  return HOTEL_SYSTEM_PROMPT
+}
+
+/**
  * Run the hotel AI agent for an inbound message.
  *
- * Loads conversation history, sends to OpenRouter with tool
- * definitions, executes tool calls server-side, and returns
- * the final natural-language reply.
+ * Loads conversation history + the account's system prompt from the
+ * database, sends to Gemini with tool definitions, executes tool
+ * calls server-side, and returns the final natural-language reply.
  */
 export async function runHotelAgent(
   args: HotelAgentArgs,
 ): Promise<HotelAgentResult> {
   const { accountId, conversationId, contactId } = args
   const db = supabaseAdmin()
+
+  // Fetch the account-specific system prompt from ai_configs
+  const systemPrompt = await fetchSystemPrompt(db, accountId)
 
   // Build conversation context (last N text messages)
   const contextMessages = await buildConversationContext(
@@ -414,9 +442,9 @@ export async function runHotelAgent(
     aiContextMessageLimit(),
   )
 
-  // Build the OpenRouter message array
+  // Build the Gemini message array
   const messages: OrMessage[] = [
-    { role: 'system', content: HOTEL_SYSTEM_PROMPT },
+    { role: 'system', content: systemPrompt },
     ...contextMessages.map((m) => ({
       role: m.role as 'user' | 'assistant',
       content: m.content,
