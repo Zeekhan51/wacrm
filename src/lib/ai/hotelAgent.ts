@@ -309,14 +309,18 @@ async function createOrder(
     }
   }
 
-  // Use the RPC for atomic order creation
+  // Use the RPC for atomic order creation. Pass the array directly —
+  // NOT JSON.stringify'd. PostgREST serialises array/object args as
+  // JSON, but a pre-stringified string gets double-encoded and arrives
+  // as a jsonb SCALAR, which makes jsonb_array_elements() fail with
+  // "cannot extract elements from a scalar".
   const { data, error } = await db.rpc('create_hotel_order', {
     p_account_id: accountId,
     p_contact_id: contactId,
     p_conversation_id: conversationId,
     p_room_or_table: roomOrTable.trim(),
     p_special_instructions: specialInstructions,
-    p_items: JSON.stringify(validItems),
+    p_items: validItems,
   })
 
   if (error) {
