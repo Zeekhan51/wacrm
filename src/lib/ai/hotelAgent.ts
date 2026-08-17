@@ -1022,7 +1022,7 @@ export async function dispatchInboundToHotelAgent(
     )
     if (!acctLimit.success) {
       console.warn(
-        '[hotel agent] account ${accountId} hit the per-account rate limit — skipping.',
+        `[hotel agent] account ${accountId} hit the per-account rate limit — skipping.`,
       )
       return
     }
