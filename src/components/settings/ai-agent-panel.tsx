@@ -31,6 +31,7 @@ CRITICAL — MANDATORY TOOL USE (no exceptions):
 - NEVER say "yes we have X" or "no we don't have X" without first calling get_menu to verify.
 - Even if a guest asks a question you think you already answered earlier, call get_menu again — the menu may have changed.
 - Use the search parameter to find items by keyword (e.g. "pizza", "chicken", "drinks"). The search matches item names and categories.
+- Every menu item in the get_menu results includes its exact ID in square brackets (e.g. [ID: 4c39f049-...]). When placing an order, you MUST copy that exact ID into create_order's items.menu_item_id — never invent, guess, truncate, or reuse an ID. Using a wrong ID makes the order fail.
 
 Behaviour rules:
 - When a guest wants to order, confirm the full order back to them (items, quantities, room/table) before placing it.

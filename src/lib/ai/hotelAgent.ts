@@ -238,7 +238,10 @@ async function getMenu(
     for (const item of items) {
       const avail = item.is_available ? '' : ' [UNAVAILABLE]'
       const desc = item.description ? ` — ${item.description}` : ''
-      lines.push(`  ${item.name}: $${item.price.toFixed(2)}${desc}${avail}`)
+      // The item id MUST be visible so create_order can pass the exact
+      // UUID back. Without it the AI fabricates an id and the RPC fails
+      // with "not found or not available in this account".
+      lines.push(`  ${item.name}: $${item.price.toFixed(2)}${desc}${avail} [ID: ${item.id}]`)
     }
   }
 
