@@ -15,7 +15,7 @@
     "createAccount": "계정 만들기"
   },
   "Sidebar": {
-    "title": "WhatsApp용 CRM 템플릿",
+    "title": "WaBuntoo",
     "dashboard": "대시보드",
     "inbox": "인박스",
     "notifications": "알림",
@@ -38,7 +38,9 @@
     "defaultAvatar": "아바타",
     "menuProfile": "프로필",
     "menuSettings": "설정",
-    "menuSignOut": "로그아웃"
+    "menuSignOut": "로그아웃",
+    "menu": "메뉴",
+    "orders": "주문"
   },
   "Header": {
     "dashboard": "대시보드",
@@ -48,6 +50,8 @@
     "pipelines": "파이프라인",
     "broadcasts": "브로드캐스트",
     "automations": "자동화",
+    "menu": "메뉴",
+    "orders": "주문",
     "settings": "설정",
     "openMenu": "메뉴 열기",
     "openAccountMenu": "계정 메뉴 열기",

@@ -4,6 +4,14 @@ import { buildConversationContext } from './context'
 import { aiContextMessageLimit } from './defaults'
 import { HOTEL_SYSTEM_PROMPT, HOTEL_HANDOFF_SENTINEL } from './hotelPrompts'
 import { engineSendText } from '@/lib/flows/meta-send'
+import { sendTextMessage } from '@/lib/whatsapp/meta-api'
+import { decrypt } from '@/lib/whatsapp/encryption'
+import {
+  sanitizePhoneForMeta,
+  isValidE164,
+  phoneVariants,
+  isRecipientNotAllowedError,
+} from '@/lib/whatsapp/phone-utils'
 import { checkRateLimit, RATE_LIMITS } from '@/lib/rate-limit'
 
 // ============================================================
@@ -254,7 +262,104 @@ async function createOrder(
   summaryLines.push(`Total: $${order?.total_price?.toFixed(2) ?? 'N/A'}`)
   summaryLines.push(`Status: ${order?.status ?? 'pending'}`)
 
+  // Best-effort staff notification — never fails the order if it errors
+  await notifyStaffOnNewOrder(db, accountId, {
+    orderId,
+    roomOrTable,
+    specialInstructions,
+    totalPrice: Number(order?.total_price ?? 0),
+    items: (lineItems ?? []).map((li) => {
+      const mi = li.menu_items as unknown as { name: string } | null
+      return {
+        name: mi?.name ?? 'Item',
+        quantity: li.quantity,
+        price: Number(li.price_at_order_time),
+      }
+    }),
+  })
+
   return { content: summaryLines.join('\n') }
+}
+
+interface StaffNotifyArgs {
+  orderId: string
+  roomOrTable: string
+  specialInstructions: string | null
+  totalPrice: number
+  items: { name: string; quantity: number; price: number }[]
+}
+
+/**
+ * Send a WhatsApp notification to the fixed staff number about a new
+ * order. Reads STAFF_NOTIFY_WHATSAPP_NUMBER (E.164, e.g. 923XXXXXXXXX).
+ * Sends through the account's configured WhatsApp number. Best-effort —
+ * logs and swallows errors so a notification failure never breaks the
+ * order placement flow.
+ */
+async function notifyStaffOnNewOrder(
+  db: SupabaseClient,
+  accountId: string,
+  args: StaffNotifyArgs,
+): Promise<void> {
+  const staffNumber = process.env.STAFF_NOTIFY_WHATSAPP_NUMBER
+  if (!staffNumber) return
+
+  const sanitized = sanitizePhoneForMeta(staffNumber)
+  if (!isValidE164(sanitized)) {
+    console.warn(
+      '[hotel agent] STAFF_NOTIFY_WHATSAPP_NUMBER is not a valid E.164 number — skipping staff notification.',
+    )
+    return
+  }
+
+  try {
+    const { data: config, error: configErr } = await db
+      .from('whatsapp_config')
+      .select('*')
+      .eq('account_id', accountId)
+      .single()
+    if (configErr || !config) {
+      console.warn('[hotel agent] no whatsapp_config — skipping staff notification.')
+      return
+    }
+
+    const accessToken = decrypt(config.access_token)
+
+    const lines: string[] = [`NEW ORDER #${args.orderId.slice(0, 8)}`]
+    lines.push(`Location: ${args.roomOrTable || 'N/A'}`)
+    if (args.specialInstructions) {
+      lines.push(`Notes: ${args.specialInstructions}`)
+    }
+    lines.push('Items:')
+    for (const item of args.items) {
+      lines.push(`  ${item.quantity}x ${item.name} — $${(item.price * item.quantity).toFixed(2)}`)
+    }
+    lines.push(`Total: $${args.totalPrice.toFixed(2)}`)
+
+    const text = lines.join('\n')
+
+    const variants = phoneVariants(sanitized)
+    let lastError: unknown = null
+    for (const v of variants) {
+      try {
+        await sendTextMessage({
+          phoneNumberId: config.phone_number_id,
+          accessToken,
+          to: v,
+          text,
+        })
+        lastError = null
+        break
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        if (!isRecipientNotAllowedError(msg)) throw err
+        lastError = err
+      }
+    }
+    if (lastError) throw lastError
+  } catch (err) {
+    console.error('[hotel agent] staff notification failed:', err)
+  }
 }
 
 async function getOrderStatus(
