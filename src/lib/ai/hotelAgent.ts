@@ -27,6 +27,21 @@ const GEMINI_URL =
   'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions'
 const MAX_TOOL_ROUNDS = 10
 
+/**
+ * Strip Gemini "thinking" content from a reply before it reaches a
+ * guest. Gemini 2.5+ models reason internally by default and, via the
+ * OpenAI-compatible endpoint, can return that reasoning inside the
+ * `content` field (wrapped in <thinking>…</thinking> or
+ * <thought>…</thought> blocks). Only the final answer should ever be
+ * sent over WhatsApp.
+ */
+function stripThinkingText(text: string): string {
+  return text
+    .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
+    .replace(/<thought>[\s\S]*?<\/thought>/gi, '')
+    .trim()
+}
+
 // --- Gemini message shapes (OpenAI-compatible format) ---
 
 interface ToolCall {
@@ -113,6 +128,37 @@ const HOTEL_TOOLS = [
       },
     },
   },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'get_guest_info',
+      description:
+        "Get the current guest's saved name. Use this to greet the guest by name and to check whether a name is already on file before placing an order.",
+      parameters: {
+        type: 'object',
+        properties: {},
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'save_guest_name',
+      description:
+        'Save the guest name to their contact record. Call this when a guest tells you their name for the first time, BEFORE placing an order. Never ask for the phone number — you already have it.',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: {
+            type: 'string',
+            description: "The guest's full name as they told you",
+          },
+        },
+        required: ['name'],
+      },
+    },
+  },
 ] as const
 
 // --- Tool execution ---
@@ -137,6 +183,10 @@ async function executeTool(
         return await createOrder(db, accountId, contactId, conversationId, args)
       case 'get_order_status':
         return await getOrderStatus(db, accountId, args)
+      case 'get_guest_info':
+        return await getGuestInfo(db, contactId)
+      case 'save_guest_name':
+        return await saveGuestName(db, accountId, contactId, args)
       default:
         return { content: `Unknown tool: ${name}` }
     }
@@ -203,14 +253,60 @@ async function createOrder(
   args: Record<string, unknown>,
 ): Promise<ToolResult> {
   const items = args.items as { menu_item_id: string; quantity: number }[]
-  const roomOrTable = args.room_or_table as string
+  const roomOrTable = (args.room_or_table as string) || ''
   const specialInstructions = (args.special_instructions as string) || null
 
-  if (!items || items.length === 0) {
+  if (!Array.isArray(items) || items.length === 0) {
     return { content: 'No items provided. Please specify at least one item to order.' }
   }
-  if (!roomOrTable) {
+  if (!roomOrTable || !roomOrTable.trim()) {
     return { content: 'Please provide a room number or table number for delivery.' }
+  }
+
+  // Pre-flight validation — the AI sometimes passes a menu item NAME or a
+  // malformed quantity instead of the exact UUID/int the RPC expects,
+  // which previously surfaced as a cryptic PG cast error. Catch it here
+  // with a clear message so the agent can correct itself.
+  const UUID_RE =
+    /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
+  const validItems: { menu_item_id: string; quantity: number }[] = []
+  for (const it of items) {
+    const id = (it as { menu_item_id?: unknown })?.menu_item_id
+    const qty = (it as { quantity?: unknown })?.quantity
+    if (typeof id !== 'string' || !UUID_RE.test(id)) {
+      return {
+        content: `Order failed: invalid menu item ID "${String(id)}". You must use the exact menu_item_id from the get_menu results.`,
+      }
+    }
+    if (typeof qty !== 'number' || !Number.isInteger(qty) || qty <= 0) {
+      return {
+        content: `Order failed: quantity for item "${id}" must be a positive whole number.`,
+      }
+    }
+    validItems.push({ menu_item_id: id, quantity: qty })
+  }
+
+  // Guest identity for the staff notification + name enforcement.
+  let guestName: string | null = null
+  let guestPhone: string | null = null
+  if (contactId) {
+    const { data: contact } = await db
+      .from('contacts')
+      .select('name, phone')
+      .eq('id', contactId)
+      .eq('account_id', accountId)
+      .maybeSingle()
+    guestName = contact?.name?.trim() || null
+    guestPhone = contact?.phone || null
+  }
+
+  // The order flow must collect the guest's name once. If the linked
+  // contact has no name, ask for it instead of placing the order.
+  if (!guestName) {
+    return {
+      content:
+        "This guest's name is not saved on their contact. Ask the guest for their name, then call save_guest_name, then retry create_order.",
+    }
   }
 
   // Use the RPC for atomic order creation
@@ -218,21 +314,16 @@ async function createOrder(
     p_account_id: accountId,
     p_contact_id: contactId,
     p_conversation_id: conversationId,
-    p_room_or_table: roomOrTable,
+    p_room_or_table: roomOrTable.trim(),
     p_special_instructions: specialInstructions,
-    p_items: JSON.stringify(items),
+    p_items: JSON.stringify(validItems),
   })
 
   if (error) {
-    // Parse PG RAISE EXCEPTION messages for user-friendly output
+    // Log the real DB error so it shows up in Vercel function logs.
     const msg = error.message || String(error)
-    if (msg.includes('not found or not available')) {
-      return { content: `Order failed: ${msg}. Please check the menu and try again.` }
-    }
-    if (msg.includes('currently unavailable')) {
-      return { content: `Order failed: ${msg}. Please choose a different item.` }
-    }
-    throw error
+    console.error('[hotel agent] create_order RPC failed:', msg)
+    return { content: formatOrderError(msg) }
   }
 
   const orderId = data as string
@@ -251,7 +342,7 @@ async function createOrder(
     .eq('order_id', orderId)
 
   const summaryLines: string[] = [`Order #${orderId.slice(0, 8)} placed!`]
-  summaryLines.push(`Room/Table: ${roomOrTable}`)
+  summaryLines.push(`Room/Table: ${roomOrTable.trim()}`)
   if (lineItems) {
     for (const li of lineItems) {
       const mi = li.menu_items as unknown as { name: string } | null
@@ -275,7 +366,9 @@ async function createOrder(
     staffNotifyWhatsappNumber,
     {
       orderId,
-      roomOrTable,
+      guestName,
+      guestPhone,
+      roomOrTable: roomOrTable.trim(),
       specialInstructions,
       totalPrice: Number(order?.total_price ?? 0),
       items: (lineItems ?? []).map((li) => {
@@ -292,8 +385,39 @@ async function createOrder(
   return { content: summaryLines.join('\n') }
 }
 
+/**
+ * Map Postgres / RPC error messages to a clear, guest-friendly string
+ * so the agent can act on it (instead of apologising generically).
+ */
+function formatOrderError(msg: string): string {
+  if (/not found or not available/i.test(msg)) {
+    return `Order failed: ${msg}`
+  }
+  if (/currently unavailable/i.test(msg)) {
+    return `Order failed: ${msg}`
+  }
+  if (/missing menu_item_id/i.test(msg)) {
+    return 'Order failed: one of the items is missing its menu item ID.'
+  }
+  if (/invalid menu_item_id|invalid input syntax for type uuid/i.test(msg)) {
+    return `Order failed: a menu item ID was invalid. Use the exact menu_item_id from get_menu results.`
+  }
+  if (/missing quantity|invalid quantity|invalid input syntax for type integer/i.test(msg)) {
+    return `Order failed: a quantity was invalid. Quantities must be positive whole numbers.`
+  }
+  if (/quantity must be a positive/i.test(msg)) {
+    return `Order failed: ${msg}`
+  }
+  if (/room or table/i.test(msg)) {
+    return 'Order failed: a room or table number is required.'
+  }
+  return `Order failed: ${msg}`
+}
+
 interface StaffNotifyArgs {
   orderId: string
+  guestName: string | null
+  guestPhone: string | null
   roomOrTable: string
   specialInstructions: string | null
   totalPrice: number
@@ -338,6 +462,8 @@ async function notifyStaffOnNewOrder(
     const accessToken = decrypt(config.access_token)
 
     const lines: string[] = [`NEW ORDER #${args.orderId.slice(0, 8)}`]
+    lines.push(`Guest: ${args.guestName || 'Unknown'}`)
+    lines.push(`Phone: ${args.guestPhone || 'N/A'}`)
     lines.push(`Location: ${args.roomOrTable || 'N/A'}`)
     if (args.specialInstructions) {
       lines.push(`Notes: ${args.specialInstructions}`)
@@ -434,6 +560,73 @@ async function getOrderStatus(
   return { content: 'Please provide either an order_id or a phone number to look up orders.' }
 }
 
+/**
+ * get_guest_info — return the guest's saved name (and phone, which is
+ * already on file — never ask for it). Used by the agent to decide
+ * whether it still needs to collect the guest's name.
+ */
+async function getGuestInfo(
+  db: SupabaseClient,
+  contactId: string | null,
+): Promise<ToolResult> {
+  if (!contactId) {
+    return { content: 'No contact is linked to this conversation.' }
+  }
+  const { data: contact } = await db
+    .from('contacts')
+    .select('name, phone')
+    .eq('id', contactId)
+    .maybeSingle()
+
+  if (!contact) {
+    return { content: 'No contact is linked to this conversation.' }
+  }
+  const name = contact.name?.trim() || null
+  if (!name) {
+    return {
+      content:
+        'The guest has no name saved on their contact yet. Ask the guest for their name and save it with save_guest_name.',
+    }
+  }
+  return { content: `Guest name: ${name}. Phone is already on file.` }
+}
+
+/**
+ * save_guest_name — persist the guest's name onto their contact record.
+ * Runs under the service role so it bypasses RLS. The WhatsApp phone
+ * number is already stored on the contact — only the name is collected.
+ */
+async function saveGuestName(
+  db: SupabaseClient,
+  accountId: string,
+  contactId: string | null,
+  args: Record<string, unknown>,
+): Promise<ToolResult> {
+  const name = typeof args.name === 'string' ? args.name.trim() : ''
+  if (!name) {
+    return { content: 'No name provided. Ask the guest for their name first.' }
+  }
+  if (name.length > 200) {
+    return { content: 'That name looks too long. Please ask the guest for a shorter name.' }
+  }
+  if (!contactId) {
+    return { content: 'No contact is linked to this conversation — cannot save the name.' }
+  }
+
+  const { error } = await db
+    .from('contacts')
+    .update({ name })
+    .eq('id', contactId)
+    .eq('account_id', accountId)
+
+  if (error) {
+    console.error('[hotel agent] save_guest_name failed:', error.message)
+    return { content: 'Failed to save the guest name. Please try again.' }
+  }
+
+  return { content: `Guest name saved: ${name}.` }
+}
+
 // --- Gemini chat completion call ---
 
 interface GeminiChoice {
@@ -464,26 +657,44 @@ async function callGemini(
   const model = process.env.AI_MODEL || 'gemini-2.0-flash'
   const timeoutMs = Number(process.env.AI_REQUEST_TIMEOUT_MS) || 30_000
 
+  const body: Record<string, unknown> = {
+    model,
+    messages,
+    tools,
+    max_tokens: 1024,
+  }
+
+  // Gemini 2.5 Flash supports disabling thinking. Turning it off stops
+  // internal reasoning from being generated at all, so it can never
+  // leak into a guest-facing reply (and saves latency + tokens).
+  // 2.5 Pro / 3.x can't disable thinking, so we rely on
+  // stripThinkingText() for those.
+  if (/gemini-2\.5-flash/i.test(model)) {
+    body.extra_body = {
+      google: {
+        thinking_config: {
+          thinking_budget: 0,
+          include_thoughts: false,
+        },
+      },
+    }
+  }
+
   const res = await fetch(GEMINI_URL, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      model,
-      messages,
-      tools,
-      max_tokens: 1024,
-    }),
+    body: JSON.stringify(body),
     signal: AbortSignal.timeout(timeoutMs),
   })
 
   if (!res.ok) {
     let detail = ''
     try {
-      const body = await res.json() as { error?: { message?: string } | string }
-      detail = typeof body?.error === 'string' ? body.error : (body?.error?.message ?? '')
+      const resBody = await res.json() as { error?: { message?: string } | string }
+      detail = typeof resBody?.error === 'string' ? resBody.error : (resBody?.error?.message ?? '')
     } catch {
       // Non-JSON
     }
@@ -496,7 +707,15 @@ async function callGemini(
     throw new Error('Gemini returned no choices')
   }
 
-  return { ...choice.message, finish_reason: choice.finish_reason }
+  // Extract only the fields we use — never spread choice.message, which
+  // may carry a `reasoning`/thinking payload that must not reach guests.
+  const { role, content, tool_calls } = choice.message
+  return {
+    role,
+    content: content ? stripThinkingText(content) : null,
+    tool_calls,
+    finish_reason: choice.finish_reason,
+  }
 }
 
 // --- Main entry point ---
