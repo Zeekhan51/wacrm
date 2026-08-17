@@ -398,7 +398,7 @@ async function createOrder(
  */
 function formatOrderError(msg: string): string {
   if (/not found or not available/i.test(msg)) {
-    return `Order failed: ${msg}`
+    return `Order failed: ${msg}. Call get_menu again, copy the exact [ID: ...] shown for the item, and retry create_order.`
   }
   if (/currently unavailable/i.test(msg)) {
     return `Order failed: ${msg}`
