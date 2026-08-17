@@ -109,7 +109,16 @@ export async function GET() {
     if (msgsErr) throw msgsErr
 
     for (const m of messages ?? []) {
-      const acctId = m.conversations?.account_id as string | undefined
+      // PostgREST returns the embedded `conversations` row as an object
+      // (many-to-one), but the inferred TS type models it as an array —
+      // normalise both shapes defensively.
+      const embedded = m.conversations as
+        | { account_id?: string }
+        | { account_id?: string }[]
+        | null
+      const acctId = Array.isArray(embedded)
+        ? embedded[0]?.account_id
+        : embedded?.account_id
       const row = acctId ? rows.get(acctId) : undefined
       if (!row) continue
       if (m.sender_type === 'customer') row.messages_received_30d += 1

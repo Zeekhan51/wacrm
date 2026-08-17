@@ -16,8 +16,14 @@
  * Everyone else gets a redirect (page) / 403 (API).
  */
 
-const HARDCODED_USER_IDS: string[] = []
-const HARDCODED_EMAILS: string[] = []
+const HARDCODED_USER_IDS: string[] = [
+  // Platform owner (Zeeshan)
+  '1e2a7c78-5a09-47ac-8d1f-5edbea18a7b5',
+]
+const HARDCODED_EMAILS: string[] = [
+  // Platform owner (Zeeshan)
+  'zeshan.bwptrade52@gmail.com',
+]
 
 function envList(value: string | undefined): string[] {
   return (value ?? '')
