@@ -109,7 +109,10 @@ export async function PATCH(request: Request) {
     // --- LLM provider config ---
     if ('llm_provider' in body) {
       const provider = body.llm_provider
-      if (typeof provider === 'string' && LLM_PROVIDERS.includes(provider as never)) {
+      if (
+        typeof provider === 'string' &&
+        (LLM_PROVIDERS as readonly string[]).includes(provider)
+      ) {
         updates.llm_provider = provider
       } else {
         return NextResponse.json(

@@ -337,7 +337,9 @@ export function AiAgentPanel() {
               <Label htmlFor="llm-provider">Provider</Label>
               <Select
                 value={llmProvider}
-                onValueChange={(v: string) => setLlmProvider(v as LlmProvider)}
+                onValueChange={(v: LlmProvider | null) =>
+                  setLlmProvider(v ?? 'gemini')
+                }
                 disabled={disabled}
               >
                 <SelectTrigger id="llm-provider">
