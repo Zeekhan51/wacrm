@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
-import { Loader2, Save, Bot, Phone } from 'lucide-react';
+import { Loader2, Save, Bot, Phone, Cpu } from 'lucide-react';
 import { useAuth } from '@/hooks/use-auth';
 import { canEditSettings } from '@/lib/auth/roles';
 import { Button } from '@/components/ui/button';
@@ -11,12 +11,26 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Switch } from '@/components/ui/switch';
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import {
   Card,
   CardContent,
   CardHeader,
   CardTitle,
   CardDescription,
 } from '@/components/ui/card';
+import {
+  LLM_PROVIDERS,
+  LLM_PROVIDER_LABEL,
+  LLM_BASE_URLS,
+  LLM_DEFAULT_MODELS,
+  type LlmProvider,
+} from '@/lib/ai/llm';
 import { SettingsPanelHead } from './settings-panel-head';
 
 const HOTEL_AGENT_DEFAULT_PROMPT = `You are a friendly, professional WhatsApp receptionist for a hotel. Your job is to:
@@ -54,6 +68,11 @@ export function AiAgentPanel() {
   const [isEnabled, setIsEnabled] = useState(false);
   const [isDefaultPrompt, setIsDefaultPrompt] = useState(true);
   const [staffNumber, setStaffNumber] = useState('');
+  const [llmProvider, setLlmProvider] = useState<LlmProvider>('gemini');
+  const [llmApiKey, setLlmApiKey] = useState('');
+  const [llmApiKeySet, setLlmApiKeySet] = useState(false);
+  const [llmModel, setLlmModel] = useState('');
+  const [llmBaseUrl, setLlmBaseUrl] = useState('');
 
   const loadedAccountIdRef = useRef<string | null>(null);
 
@@ -72,12 +91,22 @@ export function AiAgentPanel() {
         setIsEnabled(data.is_enabled ?? false);
         setStaffNumber(data.staff_notify_whatsapp_number ?? '');
         setIsDefaultPrompt(!prompt || prompt === HOTEL_AGENT_DEFAULT_PROMPT);
+        setLlmProvider(data.llm_provider ?? 'gemini');
+        setLlmApiKey('');
+        setLlmApiKeySet(data.llm_api_key_set ?? false);
+        setLlmModel(data.llm_model ?? '');
+        setLlmBaseUrl(data.llm_base_url ?? '');
       } else {
         // No config row yet — show defaults
         setSystemPrompt('');
         setIsEnabled(false);
         setStaffNumber('');
         setIsDefaultPrompt(true);
+        setLlmProvider('gemini');
+        setLlmApiKey('');
+        setLlmApiKeySet(false);
+        setLlmModel('');
+        setLlmBaseUrl('');
       }
     } catch {
       toast.error('Failed to load hotel agent configuration');
@@ -95,18 +124,29 @@ export function AiAgentPanel() {
   const handleSave = async () => {
     setSaving(true);
     try {
+      const payload: Record<string, unknown> = {
+        system_prompt: systemPrompt.trim() || null,
+        is_enabled: isEnabled,
+        staff_notify_whatsapp_number: staffNumber.trim() || null,
+        llm_provider: llmProvider,
+        llm_model: llmModel.trim() || null,
+        llm_base_url: llmBaseUrl.trim() || null,
+      };
+      // Only send the API key when the user actually typed one —
+      // leaving the field blank keeps the stored key (or none).
+      if (llmApiKey.trim()) {
+        payload.llm_api_key = llmApiKey.trim();
+      }
       const res = await fetch('/api/hotel-agent/config', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          system_prompt: systemPrompt.trim() || null,
-          is_enabled: isEnabled,
-          staff_notify_whatsapp_number: staffNumber.trim() || null,
-        }),
+        body: JSON.stringify(payload),
       });
       const data = await res.json();
       if (res.ok) {
         toast.success('Hotel agent settings saved');
+        setLlmApiKey('');
+        setLlmApiKeySet(data.llm_api_key_set ?? llmApiKeySet);
         setIsDefaultPrompt(
           !systemPrompt.trim() ||
             systemPrompt.trim() === HOTEL_AGENT_DEFAULT_PROMPT,
@@ -273,6 +313,111 @@ export function AiAgentPanel() {
                 autoComplete="off"
                 disabled={disabled}
               />
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* AI Model & Provider */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Cpu className="h-4 w-4 text-primary" /> AI Model &amp; Provider
+            </CardTitle>
+            <CardDescription>
+              Choose which AI provider runs the hotel agent. Each account can
+              bring its own API key, or the server-side environment key is
+              used as a fallback (Gemini uses GEMINI_API_KEY, the others use
+              AI_API_KEY). OpenRouter, AgentRouter and Gemini work with no
+              extra setup; pick &quot;Custom&quot; only for a different
+              OpenAI-compatible endpoint.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="llm-provider">Provider</Label>
+              <Select
+                value={llmProvider}
+                onValueChange={(v: string) => setLlmProvider(v as LlmProvider)}
+                disabled={disabled}
+              >
+                <SelectTrigger id="llm-provider">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {LLM_PROVIDERS.map((p) => (
+                    <SelectItem key={p} value={p}>
+                      {LLM_PROVIDER_LABEL[p]}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {llmProvider === 'custom' && (
+                <p className="text-xs text-muted-foreground">
+                  Custom requires a base URL (below) and an API key.
+                </p>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="llm-api-key">
+                API Key{' '}
+                {llmApiKeySet && (
+                  <span className="text-xs text-muted-foreground">
+                    (a key is saved — leave blank to keep it)
+                  </span>
+                )}
+              </Label>
+              <Input
+                id="llm-api-key"
+                type="password"
+                value={llmApiKey}
+                onChange={(e) => setLlmApiKey(e.target.value)}
+                placeholder={
+                  llmApiKeySet
+                    ? '••••••••••••••••'
+                    : `Your ${LLM_PROVIDER_LABEL[llmProvider]} API key`
+                }
+                autoComplete="off"
+                disabled={disabled}
+              />
+              <p className="text-xs text-muted-foreground">
+                {llmProvider === 'gemini'
+                  ? 'Leave blank to use the GEMINI_API_KEY environment variable.'
+                  : 'Leave blank to use the AI_API_KEY environment variable.'}
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="llm-model">Model</Label>
+              <Input
+                id="llm-model"
+                value={llmModel}
+                onChange={(e) => setLlmModel(e.target.value)}
+                placeholder={LLM_DEFAULT_MODELS[llmProvider]}
+                autoComplete="off"
+                disabled={disabled}
+              />
+              <p className="text-xs text-muted-foreground">
+                Leave blank for the default (
+                {LLM_DEFAULT_MODELS[llmProvider]}).
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="llm-base-url">Base URL (advanced)</Label>
+              <Input
+                id="llm-base-url"
+                value={llmBaseUrl}
+                onChange={(e) => setLlmBaseUrl(e.target.value)}
+                placeholder={LLM_BASE_URLS[llmProvider]}
+                autoComplete="off"
+                disabled={disabled}
+              />
+              <p className="text-xs text-muted-foreground">
+                {llmProvider === 'custom'
+                  ? 'Required for Custom. Full chat-completions URL, e.g. https://gateway.example.com/v1/chat/completions.'
+                  : 'Leave blank for the default endpoint of the selected provider.'}
+              </p>
             </div>
           </CardContent>
         </Card>

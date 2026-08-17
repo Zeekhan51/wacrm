@@ -6,6 +6,8 @@ import {
 } from '@/lib/auth/account'
 import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from '@/lib/rate-limit'
 import { sanitizePhoneForMeta, isValidE164 } from '@/lib/whatsapp/phone-utils'
+import { encrypt } from '@/lib/whatsapp/encryption'
+import { LLM_PROVIDERS } from '@/lib/ai/llm'
 
 /**
  * GET /api/hotel-agent/config
@@ -21,7 +23,7 @@ export async function GET() {
     const { data, error } = await supabase
       .from('hotel_agent_configs')
       .select(
-        'system_prompt, is_enabled, staff_notify_whatsapp_number, created_at, updated_at',
+        'system_prompt, is_enabled, staff_notify_whatsapp_number, llm_provider, llm_api_key, llm_model, llm_base_url, created_at, updated_at',
       )
       .eq('account_id', accountId)
       .maybeSingle()
@@ -41,6 +43,10 @@ export async function GET() {
       system_prompt: data.system_prompt,
       is_enabled: data.is_enabled,
       staff_notify_whatsapp_number: data.staff_notify_whatsapp_number,
+      llm_provider: data.llm_provider,
+      llm_api_key_set: !!data.llm_api_key,
+      llm_model: data.llm_model,
+      llm_base_url: data.llm_base_url,
     })
   } catch (err) {
     return toErrorResponse(err)
@@ -100,6 +106,38 @@ export async function PATCH(request: Request) {
       }
     }
 
+    // --- LLM provider config ---
+    if ('llm_provider' in body) {
+      const provider = body.llm_provider
+      if (typeof provider === 'string' && LLM_PROVIDERS.includes(provider as never)) {
+        updates.llm_provider = provider
+      } else {
+        return NextResponse.json(
+          { error: 'Unknown LLM provider. Choose one of: gemini, openrouter, agentrouter, custom.' },
+          { status: 400 },
+        )
+      }
+    }
+
+    if ('llm_api_key' in body) {
+      const raw = body.llm_api_key
+      // Empty string clears the stored key; otherwise encrypt it.
+      updates.llm_api_key =
+        typeof raw === 'string' && raw.trim() ? encrypt(raw.trim()) : null
+    }
+
+    if ('llm_model' in body) {
+      const raw = body.llm_model
+      updates.llm_model =
+        typeof raw === 'string' && raw.trim() ? raw.trim() : null
+    }
+
+    if ('llm_base_url' in body) {
+      const raw = body.llm_base_url
+      updates.llm_base_url =
+        typeof raw === 'string' && raw.trim() ? raw.trim() : null
+    }
+
     if (Object.keys(updates).length === 0) {
       return NextResponse.json({ error: 'No fields to update' }, { status: 400 })
     }
@@ -139,7 +177,9 @@ export async function PATCH(request: Request) {
     // Return the updated state
     const { data: saved } = await supabase
       .from('hotel_agent_configs')
-      .select('system_prompt, is_enabled, staff_notify_whatsapp_number')
+      .select(
+        'system_prompt, is_enabled, staff_notify_whatsapp_number, llm_provider, llm_api_key, llm_model, llm_base_url',
+      )
       .eq('account_id', accountId)
       .maybeSingle()
 
@@ -148,6 +188,10 @@ export async function PATCH(request: Request) {
       system_prompt: saved?.system_prompt ?? null,
       is_enabled: saved?.is_enabled ?? false,
       staff_notify_whatsapp_number: saved?.staff_notify_whatsapp_number ?? null,
+      llm_provider: saved?.llm_provider ?? 'gemini',
+      llm_api_key_set: !!saved?.llm_api_key,
+      llm_model: saved?.llm_model ?? null,
+      llm_base_url: saved?.llm_base_url ?? null,
     })
   } catch (err) {
     return toErrorResponse(err)

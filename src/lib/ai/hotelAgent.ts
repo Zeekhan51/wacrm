@@ -3,6 +3,7 @@ import { supabaseAdmin } from './admin-client'
 import { buildConversationContext } from './context'
 import { aiContextMessageLimit } from './defaults'
 import { HOTEL_SYSTEM_PROMPT, HOTEL_HANDOFF_SENTINEL } from './hotelPrompts'
+import { resolveLlmConfig, type LlmConfig } from './llm'
 import { engineSendText } from '@/lib/flows/meta-send'
 import { sendTextMessage } from '@/lib/whatsapp/meta-api'
 import { decrypt } from '@/lib/whatsapp/encryption'
@@ -15,16 +16,14 @@ import {
 import { checkRateLimit, RATE_LIMITS } from '@/lib/rate-limit'
 
 // ============================================================
-// Hotel AI Agent — Google Gemini tool-calling loop.
+// Hotel AI Agent — provider-agnostic tool-calling loop.
 //
-// Calls Google AI Studio's OpenAI-compatible chat completions
-// endpoint with function/tool definitions. Executes tool calls
-// server-side and feeds results back until the model produces a
-// final text reply.
+// Calls any OpenAI-compatible chat completions endpoint (Google
+// Gemini, OpenRouter, AgentRouter, or a custom gateway) with
+// function/tool definitions. Executes tool calls server-side and
+// feeds results back until the model produces a final text reply.
 // ============================================================
 
-const GEMINI_URL =
-  'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions'
 const MAX_TOOL_ROUNDS = 10
 
 /**
@@ -634,7 +633,7 @@ async function saveGuestName(
   return { content: `Guest name saved: ${name}.` }
 }
 
-// --- Gemini chat completion call ---
+// --- Provider chat completion call ---
 
 interface GeminiChoice {
   message: {
@@ -654,18 +653,33 @@ interface GeminiResponse {
   }
 }
 
-async function callGemini(
+/**
+ * Call the account's configured LLM endpoint (Gemini, OpenRouter,
+ * AgentRouter, or a custom OpenAI-compatible gateway) with tool
+ * definitions. Retries transient failures — rate limits (429) and
+ * provider 5xx/network errors — with short backoff, since a
+ * free-tier 429 usually clears within seconds.
+ */
+async function callLlm(
   messages: OrMessage[],
   tools: typeof HOTEL_TOOLS,
+  llm: LlmConfig,
 ): Promise<GeminiChoice['message'] & { finish_reason: string }> {
-  const apiKey = process.env.GEMINI_API_KEY
-  if (!apiKey) throw new Error('GEMINI_API_KEY is not set')
+  if (!llm.apiKey) {
+    throw new Error(
+      `No API key configured for the "${llm.provider}" provider. Add one in Settings → AI Agent, or set the ${llm.provider === 'gemini' ? 'GEMINI_API_KEY' : 'AI_API_KEY'} environment variable.`,
+    )
+  }
+  if (!llm.baseUrl) {
+    throw new Error(
+      'No base URL configured for the "custom" provider. Enter the API base URL in Settings → AI Agent.',
+    )
+  }
 
-  const model = process.env.AI_MODEL || 'gemini-2.0-flash'
   const timeoutMs = Number(process.env.AI_REQUEST_TIMEOUT_MS) || 30_000
 
   const body: Record<string, unknown> = {
-    model,
+    model: llm.model,
     messages,
     tools,
     max_tokens: 1024,
@@ -675,8 +689,9 @@ async function callGemini(
   // internal reasoning from being generated at all, so it can never
   // leak into a guest-facing reply (and saves latency + tokens).
   // 2.5 Pro / 3.x can't disable thinking, so we rely on
-  // stripThinkingText() for those.
-  if (/gemini-2\.5-flash/i.test(model)) {
+  // stripThinkingText() for those. Other providers manage reasoning
+  // internally and don't expose it.
+  if (llm.provider === 'gemini' && /gemini-2\.5-flash/i.test(llm.model)) {
     body.extra_body = {
       google: {
         thinking_config: {
@@ -687,42 +702,87 @@ async function callGemini(
     }
   }
 
-  const res = await fetch(GEMINI_URL, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(timeoutMs),
-  })
+  // Short backoff between retries. 429/5xx and network failures are
+  // transient; everything else (bad request, auth, no choices) is
+  // thrown immediately.
+  const retryDelaysMs = [0, 1_000, 2_500, 5_000]
+  let lastError: unknown = null
 
-  if (!res.ok) {
-    let detail = ''
-    try {
-      const resBody = await res.json() as { error?: { message?: string } | string }
-      detail = typeof resBody?.error === 'string' ? resBody.error : (resBody?.error?.message ?? '')
-    } catch {
-      // Non-JSON
+  for (let attempt = 0; attempt < retryDelaysMs.length; attempt++) {
+    if (retryDelaysMs[attempt] > 0) {
+      await new Promise((resolve) => setTimeout(resolve, retryDelaysMs[attempt]))
     }
-    throw new Error(`Gemini API error (${res.status}): ${detail || res.statusText}`)
+
+    let res: Response
+    try {
+      res = await fetch(llm.baseUrl, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${llm.apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(timeoutMs),
+      })
+    } catch (err) {
+      // Network-level failure (DNS, connect, timeout) — transient.
+      lastError = err
+      console.warn(
+        `[hotel agent] ${llm.provider} request failed (attempt ${attempt + 1}/${retryDelaysMs.length}) — retrying:`,
+        err,
+      )
+      continue
+    }
+
+    if (res.status === 429 || res.status >= 500) {
+      lastError = new Error(
+        `${llm.provider} API error (${res.status}): ${res.statusText}`,
+      )
+      console.warn(
+        `[hotel agent] ${llm.provider} API returned ${res.status} (attempt ${attempt + 1}/${retryDelaysMs.length}) — retrying`,
+      )
+      continue
+    }
+
+    if (!res.ok) {
+      let detail = ''
+      try {
+        const resBody = (await res.json()) as {
+          error?: { message?: string } | string
+        }
+        detail =
+          typeof resBody?.error === 'string'
+            ? resBody.error
+            : (resBody?.error?.message ?? '')
+      } catch {
+        // Non-JSON
+      }
+      throw new Error(
+        `${llm.provider} API error (${res.status}): ${detail || res.statusText}`,
+      )
+    }
+
+    const data = (await res.json()) as GeminiResponse
+    const choice = data.choices?.[0]
+    if (!choice) {
+      throw new Error(`${llm.provider} returned no choices`)
+    }
+
+    // Extract only the fields we use — never spread choice.message,
+    // which may carry a `reasoning`/thinking payload that must not
+    // reach guests.
+    const { role, content, tool_calls } = choice.message
+    return {
+      role,
+      content: content ? stripThinkingText(content) : null,
+      tool_calls,
+      finish_reason: choice.finish_reason,
+    }
   }
 
-  const data = (await res.json()) as GeminiResponse
-  const choice = data.choices?.[0]
-  if (!choice) {
-    throw new Error('Gemini returned no choices')
-  }
-
-  // Extract only the fields we use — never spread choice.message, which
-  // may carry a `reasoning`/thinking payload that must not reach guests.
-  const { role, content, tool_calls } = choice.message
-  return {
-    role,
-    content: content ? stripThinkingText(content) : null,
-    tool_calls,
-    finish_reason: choice.finish_reason,
-  }
+  throw lastError instanceof Error
+    ? lastError
+    : new Error(`Unknown ${llm.provider} failure`)
 }
 
 // --- Main entry point ---
@@ -741,9 +801,10 @@ interface HotelAgentResult {
 /**
  * Fetch the hotel agent config for this account from the dedicated
  * hotel_agent_configs table. Returns the system prompt, whether the
- * agent is enabled, and the per-account staff WhatsApp number used
- * for order notifications. Falls back to the hardcoded default prompt
- * when no prompt is configured.
+ * agent is enabled, the per-account staff WhatsApp number used for
+ * order notifications, and the resolved LLM provider settings
+ * (provider, key, model, base URL — with env fallbacks). Falls back
+ * to the hardcoded default prompt when no prompt is configured.
  */
 async function fetchHotelAgentConfig(
   db: SupabaseClient,
@@ -752,20 +813,40 @@ async function fetchHotelAgentConfig(
   systemPrompt: string
   isEnabled: boolean
   staffNotifyWhatsappNumber: string | null
+  llm: LlmConfig
 }> {
   try {
     const { data } = await db
       .from('hotel_agent_configs')
-      .select('system_prompt, is_enabled, staff_notify_whatsapp_number')
+      .select(
+        'system_prompt, is_enabled, staff_notify_whatsapp_number, llm_provider, llm_api_key, llm_model, llm_base_url',
+      )
       .eq('account_id', accountId)
       .maybeSingle()
 
     if (data) {
+      let llmApiKey: string | null = null
+      if (data.llm_api_key) {
+        try {
+          llmApiKey = decrypt(data.llm_api_key)
+        } catch (err) {
+          console.error(
+            '[hotel agent] failed to decrypt stored LLM API key:',
+            err,
+          )
+        }
+      }
       return {
         systemPrompt: data.system_prompt?.trim() || HOTEL_SYSTEM_PROMPT,
         isEnabled: data.is_enabled ?? false,
         staffNotifyWhatsappNumber:
           data.staff_notify_whatsapp_number?.trim() || null,
+        llm: resolveLlmConfig({
+          llmProvider: data.llm_provider ?? null,
+          llmApiKey,
+          llmModel: data.llm_model ?? null,
+          llmBaseUrl: data.llm_base_url ?? null,
+        }),
       }
     }
   } catch (err) {
@@ -775,6 +856,12 @@ async function fetchHotelAgentConfig(
     systemPrompt: HOTEL_SYSTEM_PROMPT,
     isEnabled: false,
     staffNotifyWhatsappNumber: null,
+    llm: resolveLlmConfig({
+      llmProvider: null,
+      llmApiKey: null,
+      llmModel: null,
+      llmBaseUrl: null,
+    }),
   }
 }
 
@@ -782,9 +869,10 @@ async function fetchHotelAgentConfig(
  * Run the hotel AI agent for an inbound message.
  *
  * Loads conversation history + the account's system prompt from the
- * dedicated hotel_agent_configs table, sends to Gemini with tool
- * definitions, executes tool calls server-side, and returns the
- * final natural-language reply.
+ * dedicated hotel_agent_configs table, sends to the account's
+ * configured LLM provider (Gemini / OpenRouter / AgentRouter /
+ * custom) with tool definitions, executes tool calls server-side,
+ * and returns the final natural-language reply.
  */
 export async function runHotelAgent(
   args: HotelAgentArgs,
@@ -793,7 +881,7 @@ export async function runHotelAgent(
   const db = supabaseAdmin()
 
   // Fetch the account-specific config from hotel_agent_configs
-  const { systemPrompt } = await fetchHotelAgentConfig(db, accountId)
+  const { systemPrompt, llm } = await fetchHotelAgentConfig(db, accountId)
 
   // Build conversation context (last N text messages)
   const contextMessages = await buildConversationContext(
@@ -813,7 +901,7 @@ export async function runHotelAgent(
 
   // Tool-use loop
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-    const response = await callGemini(messages, HOTEL_TOOLS)
+    const response = await callLlm(messages, HOTEL_TOOLS, llm)
 
     // If no tool calls, we have the final reply
     if (!response.tool_calls || response.tool_calls.length === 0) {
@@ -910,6 +998,7 @@ export async function dispatchInboundToHotelAgent(
 ): Promise<void> {
   const { accountId, conversationId, contactId, configOwnerUserId } = args
 
+  let sentReply = false
   try {
     const db = supabaseAdmin()
 
@@ -961,7 +1050,28 @@ export async function dispatchInboundToHotelAgent(
       text,
       aiGenerated: true,
     })
+    sentReply = true
   } catch (err) {
     console.error('[hotel agent] dispatch failed:', err)
+    // A transient provider outage (e.g. Gemini rate limit 429) or DB
+    // hiccup shouldn't leave the guest hanging with silence. Send a
+    // short graceful fallback — but only if we haven't already replied.
+    if (!sentReply) {
+      try {
+        await engineSendText({
+          accountId,
+          userId: configOwnerUserId,
+          conversationId,
+          contactId,
+          text: "Sorry, I'm a little busy right now — please try again in a few seconds.",
+          aiGenerated: true,
+        })
+      } catch (fallbackErr) {
+        console.error(
+          '[hotel agent] failed to send graceful fallback:',
+          fallbackErr,
+        )
+      }
+    }
   }
 }
