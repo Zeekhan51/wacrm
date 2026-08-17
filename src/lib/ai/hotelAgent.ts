@@ -262,21 +262,32 @@ async function createOrder(
   summaryLines.push(`Total: $${order?.total_price?.toFixed(2) ?? 'N/A'}`)
   summaryLines.push(`Status: ${order?.status ?? 'pending'}`)
 
-  // Best-effort staff notification — never fails the order if it errors
-  await notifyStaffOnNewOrder(db, accountId, {
-    orderId,
-    roomOrTable,
-    specialInstructions,
-    totalPrice: Number(order?.total_price ?? 0),
-    items: (lineItems ?? []).map((li) => {
-      const mi = li.menu_items as unknown as { name: string } | null
-      return {
-        name: mi?.name ?? 'Item',
-        quantity: li.quantity,
-        price: Number(li.price_at_order_time),
-      }
-    }),
-  })
+  // Best-effort staff notification — never fails the order if it errors.
+  // The staff number is the account's own number from hotel_agent_configs
+  // (per-account, not a global env var).
+  const { staffNotifyWhatsappNumber } = await fetchHotelAgentConfig(
+    db,
+    accountId,
+  )
+  await notifyStaffOnNewOrder(
+    db,
+    accountId,
+    staffNotifyWhatsappNumber,
+    {
+      orderId,
+      roomOrTable,
+      specialInstructions,
+      totalPrice: Number(order?.total_price ?? 0),
+      items: (lineItems ?? []).map((li) => {
+        const mi = li.menu_items as unknown as { name: string } | null
+        return {
+          name: mi?.name ?? 'Item',
+          quantity: li.quantity,
+          price: Number(li.price_at_order_time),
+        }
+      }),
+    },
+  )
 
   return { content: summaryLines.join('\n') }
 }
@@ -290,24 +301,25 @@ interface StaffNotifyArgs {
 }
 
 /**
- * Send a WhatsApp notification to the fixed staff number about a new
- * order. Reads STAFF_NOTIFY_WHATSAPP_NUMBER (E.164, e.g. 923XXXXXXXXX).
- * Sends through the account's configured WhatsApp number. Best-effort —
+ * Send a WhatsApp notification to the account's staff number about a
+ * new order. The number is stored per-account in
+ * hotel_agent_configs.staff_notify_whatsapp_number (E.164). Sends
+ * through the account's configured WhatsApp number. Best-effort —
  * logs and swallows errors so a notification failure never breaks the
  * order placement flow.
  */
 async function notifyStaffOnNewOrder(
   db: SupabaseClient,
   accountId: string,
+  staffNumber: string | null,
   args: StaffNotifyArgs,
 ): Promise<void> {
-  const staffNumber = process.env.STAFF_NOTIFY_WHATSAPP_NUMBER
   if (!staffNumber) return
 
   const sanitized = sanitizePhoneForMeta(staffNumber)
   if (!isValidE164(sanitized)) {
     console.warn(
-      '[hotel agent] STAFF_NOTIFY_WHATSAPP_NUMBER is not a valid E.164 number — skipping staff notification.',
+      '[hotel agent] configured staff notification number is not a valid E.164 number — skipping staff notification.',
     )
     return
   }
@@ -502,18 +514,23 @@ interface HotelAgentResult {
 
 /**
  * Fetch the hotel agent config for this account from the dedicated
- * hotel_agent_configs table. Returns the system prompt and whether
- * the agent is enabled. Falls back to the hardcoded default prompt
+ * hotel_agent_configs table. Returns the system prompt, whether the
+ * agent is enabled, and the per-account staff WhatsApp number used
+ * for order notifications. Falls back to the hardcoded default prompt
  * when no prompt is configured.
  */
 async function fetchHotelAgentConfig(
   db: SupabaseClient,
   accountId: string,
-): Promise<{ systemPrompt: string; isEnabled: boolean }> {
+): Promise<{
+  systemPrompt: string
+  isEnabled: boolean
+  staffNotifyWhatsappNumber: string | null
+}> {
   try {
     const { data } = await db
       .from('hotel_agent_configs')
-      .select('system_prompt, is_enabled')
+      .select('system_prompt, is_enabled, staff_notify_whatsapp_number')
       .eq('account_id', accountId)
       .maybeSingle()
 
@@ -521,12 +538,18 @@ async function fetchHotelAgentConfig(
       return {
         systemPrompt: data.system_prompt?.trim() || HOTEL_SYSTEM_PROMPT,
         isEnabled: data.is_enabled ?? false,
+        staffNotifyWhatsappNumber:
+          data.staff_notify_whatsapp_number?.trim() || null,
       }
     }
   } catch (err) {
     console.error('[hotel agent] failed to fetch config:', err)
   }
-  return { systemPrompt: HOTEL_SYSTEM_PROMPT, isEnabled: false }
+  return {
+    systemPrompt: HOTEL_SYSTEM_PROMPT,
+    isEnabled: false,
+    staffNotifyWhatsappNumber: null,
+  }
 }
 
 /**

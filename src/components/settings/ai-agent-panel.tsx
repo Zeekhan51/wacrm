@@ -2,10 +2,11 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
-import { Loader2, Save, Bot } from 'lucide-react';
+import { Loader2, Save, Bot, Phone } from 'lucide-react';
 import { useAuth } from '@/hooks/use-auth';
 import { canEditSettings } from '@/lib/auth/roles';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Switch } from '@/components/ui/switch';
@@ -49,6 +50,7 @@ export function AiAgentPanel() {
   const [systemPrompt, setSystemPrompt] = useState('');
   const [isEnabled, setIsEnabled] = useState(false);
   const [isDefaultPrompt, setIsDefaultPrompt] = useState(true);
+  const [staffNumber, setStaffNumber] = useState('');
 
   const loadedAccountIdRef = useRef<string | null>(null);
 
@@ -65,11 +67,13 @@ export function AiAgentPanel() {
         const prompt = data.system_prompt ?? '';
         setSystemPrompt(prompt);
         setIsEnabled(data.is_enabled ?? false);
+        setStaffNumber(data.staff_notify_whatsapp_number ?? '');
         setIsDefaultPrompt(!prompt || prompt === HOTEL_AGENT_DEFAULT_PROMPT);
       } else {
         // No config row yet — show defaults
         setSystemPrompt('');
         setIsEnabled(false);
+        setStaffNumber('');
         setIsDefaultPrompt(true);
       }
     } catch {
@@ -94,6 +98,7 @@ export function AiAgentPanel() {
         body: JSON.stringify({
           system_prompt: systemPrompt.trim() || null,
           is_enabled: isEnabled,
+          staff_notify_whatsapp_number: staffNumber.trim() || null,
         }),
       });
       const data = await res.json();
@@ -235,6 +240,36 @@ export function AiAgentPanel() {
               >
                 Reset to Default
               </Button>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Staff notification number */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Phone className="h-4 w-4 text-primary" /> Staff Notifications
+            </CardTitle>
+            <CardDescription>
+              When a guest places an order, the agent sends a WhatsApp
+              notification to this number. Each account has its own staff
+              number. Enter it in E.164 format — country code + number, no
+              leading zero, no + sign (e.g. 923XXXXXXXXX for a Pakistani
+              number 03XXXXXXXXX). Leave empty to disable.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-2">
+              <Label htmlFor="staff-notify-number">Staff WhatsApp Number</Label>
+              <Input
+                id="staff-notify-number"
+                value={staffNumber}
+                onChange={(e) => setStaffNumber(e.target.value)}
+                placeholder="923XXXXXXXXX"
+                inputMode="tel"
+                autoComplete="off"
+                disabled={disabled}
+              />
             </div>
           </CardContent>
         </Card>

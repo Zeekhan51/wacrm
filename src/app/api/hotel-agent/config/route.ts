@@ -5,6 +5,7 @@ import {
   toErrorResponse,
 } from '@/lib/auth/account'
 import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from '@/lib/rate-limit'
+import { sanitizePhoneForMeta, isValidE164 } from '@/lib/whatsapp/phone-utils'
 
 /**
  * GET /api/hotel-agent/config
@@ -19,7 +20,9 @@ export async function GET() {
 
     const { data, error } = await supabase
       .from('hotel_agent_configs')
-      .select('system_prompt, is_enabled, created_at, updated_at')
+      .select(
+        'system_prompt, is_enabled, staff_notify_whatsapp_number, created_at, updated_at',
+      )
       .eq('account_id', accountId)
       .maybeSingle()
 
@@ -37,6 +40,7 @@ export async function GET() {
       configured: true,
       system_prompt: data.system_prompt,
       is_enabled: data.is_enabled,
+      staff_notify_whatsapp_number: data.staff_notify_whatsapp_number,
     })
   } catch (err) {
     return toErrorResponse(err)
@@ -73,6 +77,27 @@ export async function PATCH(request: Request) {
 
     if ('is_enabled' in body) {
       updates.is_enabled = body.is_enabled === true
+    }
+
+    if ('staff_notify_whatsapp_number' in body) {
+      const raw = body.staff_notify_whatsapp_number
+      const value =
+        typeof raw === 'string' && raw.trim() ? raw.trim() : null
+      if (value) {
+        const sanitized = sanitizePhoneForMeta(value)
+        if (!isValidE164(sanitized)) {
+          return NextResponse.json(
+            {
+              error:
+                'Staff notification number must be in E.164 format (e.g. 923XXXXXXXXX, no leading zero, no +).',
+            },
+            { status: 400 },
+          )
+        }
+        updates.staff_notify_whatsapp_number = sanitized
+      } else {
+        updates.staff_notify_whatsapp_number = null
+      }
     }
 
     if (Object.keys(updates).length === 0) {
@@ -114,7 +139,7 @@ export async function PATCH(request: Request) {
     // Return the updated state
     const { data: saved } = await supabase
       .from('hotel_agent_configs')
-      .select('system_prompt, is_enabled')
+      .select('system_prompt, is_enabled, staff_notify_whatsapp_number')
       .eq('account_id', accountId)
       .maybeSingle()
 
@@ -122,6 +147,7 @@ export async function PATCH(request: Request) {
       success: true,
       system_prompt: saved?.system_prompt ?? null,
       is_enabled: saved?.is_enabled ?? false,
+      staff_notify_whatsapp_number: saved?.staff_notify_whatsapp_number ?? null,
     })
   } catch (err) {
     return toErrorResponse(err)
