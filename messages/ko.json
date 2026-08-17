@@ -40,7 +40,8 @@
     "menuSettings": "설정",
     "menuSignOut": "로그아웃",
     "menu": "메뉴",
-    "orders": "주문"
+    "orders": "주문",
+    "platformAdmin": "플랫폼 관리"
   },
   "Header": {
     "dashboard": "대시보드",

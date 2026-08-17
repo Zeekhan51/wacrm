@@ -40,7 +40,8 @@
     "menuSettings": "Settings",
     "menuSignOut": "Sign out",
     "menu": "Menu",
-    "orders": "Orders"
+    "orders": "Orders",
+    "platformAdmin": "Platform Admin"
   },
   "Header": {
     "dashboard": "Dashboard",
