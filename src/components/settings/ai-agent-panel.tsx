@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
-import { Loader2, Save, Bot, Phone, Cpu } from 'lucide-react';
+import { Loader2, Save, Bot, Phone, Cpu, PlugZap } from 'lucide-react';
 import { useAuth } from '@/hooks/use-auth';
 import { canEditSettings } from '@/lib/auth/roles';
 import { Button } from '@/components/ui/button';
@@ -73,6 +73,7 @@ export function AiAgentPanel() {
   const [llmApiKeySet, setLlmApiKeySet] = useState(false);
   const [llmModel, setLlmModel] = useState('');
   const [llmBaseUrl, setLlmBaseUrl] = useState('');
+  const [testing, setTesting] = useState(false);
 
   const loadedAccountIdRef = useRef<string | null>(null);
 
@@ -187,6 +188,32 @@ export function AiAgentPanel() {
   const handleResetPrompt = () => {
     setSystemPrompt(HOTEL_AGENT_DEFAULT_PROMPT);
     setIsDefaultPrompt(false);
+  };
+
+  const handleTestConnection = async () => {
+    setTesting(true);
+    try {
+      const res = await fetch('/api/hotel-agent/config/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: llmProvider,
+          api_key: llmApiKey.trim() || null,
+          model: llmModel.trim() || null,
+          base_url: llmBaseUrl.trim() || null,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        toast.success(`Connected to ${data.provider} (${data.model})`);
+      } else {
+        toast.error(data.error ?? 'Connection test failed');
+      }
+    } catch {
+      toast.error('Connection test failed');
+    } finally {
+      setTesting(false);
+    }
   };
 
   if (loading || profileLoading) {
@@ -420,6 +447,19 @@ export function AiAgentPanel() {
                   ? 'Required for Custom. Full chat-completions URL, e.g. https://gateway.example.com/v1/chat/completions.'
                   : 'Leave blank for the default endpoint of the selected provider.'}
               </p>
+            </div>
+
+            <div className="flex justify-end">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleTestConnection}
+                disabled={disabled || testing}
+              >
+                {testing && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                <PlugZap className="mr-2 h-4 w-4" />
+                Test Connection
+              </Button>
             </div>
           </CardContent>
         </Card>

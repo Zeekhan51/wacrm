@@ -660,9 +660,9 @@ interface GeminiResponse {
  * provider 5xx/network errors — with short backoff, since a
  * free-tier 429 usually clears within seconds.
  */
-async function callLlm(
+export async function callLlm(
   messages: OrMessage[],
-  tools: typeof HOTEL_TOOLS,
+  tools: typeof HOTEL_TOOLS | undefined,
   llm: LlmConfig,
 ): Promise<GeminiChoice['message'] & { finish_reason: string }> {
   if (!llm.apiKey) {
@@ -681,9 +681,9 @@ async function callLlm(
   const body: Record<string, unknown> = {
     model: llm.model,
     messages,
-    tools,
     max_tokens: 1024,
   }
+  if (tools) body.tools = tools
 
   // Gemini 2.5 Flash supports disabling thinking. Turning it off stops
   // internal reasoning from being generated at all, so it can never
