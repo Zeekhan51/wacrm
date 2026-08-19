@@ -427,8 +427,13 @@ export function AiAgentPanel() {
                 disabled={disabled}
               />
               <p className="text-xs text-muted-foreground">
-                Leave blank for the default (
-                {LLM_DEFAULT_MODELS[llmProvider]}).
+                {llmProvider === 'openrouter'
+                  ? 'Use full model ID from OpenRouter (e.g. "openai/gpt-4o-mini", "google/gemma-2-9b-it:free"). Free tier is heavily rate-limited (429s expected).'
+                  : llmProvider === 'agentrouter'
+                    ? 'Depends on your AgentRouter gateway config. Check your AgentRouter dashboard for available models.'
+                    : llmProvider === 'gemini'
+                      ? 'Gemini model name (e.g. "gemini-2.0-flash", "gemini-2.5-flash").'
+                      : 'Model ID for your custom endpoint (e.g. "gpt-4o-mini").'}
               </p>
             </div>
 

@@ -42,11 +42,12 @@ export const LLM_BASE_URLS: Record<LlmProvider, string> = {
 }
 
 /** Sensible default model per provider (editable free text in the UI —
- *  model IDs churn fast). */
+ *  model IDs churn fast). For AgentRouter/Custom, the available models
+ *  depend on your gateway/account — check the provider's dashboard. */
 export const LLM_DEFAULT_MODELS: Record<LlmProvider, string> = {
   gemini: 'gemini-2.0-flash',
   openrouter: 'gpt-4o-mini',
-  agentrouter: 'gpt-4o-mini',
+  agentrouter: 'claude-3-haiku',
   custom: 'gpt-4o-mini',
 }
 

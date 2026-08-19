@@ -704,8 +704,8 @@ export async function callLlm(
 
   // Short backoff between retries. 429/5xx and network failures are
   // transient; everything else (bad request, auth, no choices) is
-  // thrown immediately.
-  const retryDelaysMs = [0, 1_000, 2_500, 5_000]
+  // thrown immediately. Free tiers often 429 — use longer delays.
+  const retryDelaysMs = [0, 2_000, 5_000, 10_000]
   let lastError: unknown = null
 
   for (let attempt = 0; attempt < retryDelaysMs.length; attempt++) {
@@ -736,7 +736,7 @@ export async function callLlm(
 
     if (res.status === 429 || res.status >= 500) {
       lastError = new Error(
-        `${llm.provider} API error (${res.status}): ${res.statusText}`,
+        `${llm.provider} API error (${res.status}) at ${llm.baseUrl}: ${res.statusText}`,
       )
       console.warn(
         `[hotel agent] ${llm.provider} API returned ${res.status} (attempt ${attempt + 1}/${retryDelaysMs.length}) — retrying`,
@@ -764,7 +764,7 @@ export async function callLlm(
         }
       }
       throw new Error(
-        `${llm.provider} API error (${res.status}): ${detail || res.statusText}`,
+        `${llm.provider} API error (${res.status}) at ${llm.baseUrl}: ${detail || res.statusText}`,
       )
     }
 
