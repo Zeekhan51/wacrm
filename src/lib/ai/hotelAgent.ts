@@ -755,7 +755,13 @@ export async function callLlm(
             ? resBody.error
             : (resBody?.error?.message ?? '')
       } catch {
-        // Non-JSON
+        // Non-JSON (e.g. HTML error page) — read as text so the message
+        // is useful instead of "Unexpected token '<'".
+        try {
+          detail = await res.text()
+        } catch {
+          detail = res.statusText
+        }
       }
       throw new Error(
         `${llm.provider} API error (${res.status}): ${detail || res.statusText}`,
