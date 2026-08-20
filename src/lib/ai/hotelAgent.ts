@@ -676,6 +676,10 @@ export async function callLlm(
     )
   }
 
+  console.log(
+    `[hotel agent] LLM call → provider=${llm.provider} model=${llm.model} baseUrl=${llm.baseUrl}`,
+  )
+
   const timeoutMs = Number(process.env.AI_REQUEST_TIMEOUT_MS) || 30_000
 
   const body: Record<string, unknown> = {
@@ -768,7 +772,18 @@ export async function callLlm(
       )
     }
 
-    const data = (await res.json()) as GeminiResponse
+    // Some providers (AgentRouter, etc.) return 200 OK with HTML error
+    // pages instead of JSON. Handle both JSON and non-JSON responses.
+    let data: GeminiResponse
+    try {
+      data = (await res.json()) as GeminiResponse
+    } catch {
+      // Non-JSON response on 200 — read as text for the error message.
+      const text = await res.text().catch(() => '')
+      throw new Error(
+        `${llm.provider} returned 200 but non-JSON response at ${llm.baseUrl}: ${text.slice(0, 500)}`,
+      )
+    }
     const choice = data.choices?.[0]
     if (!choice) {
       throw new Error(`${llm.provider} returned no choices`)
