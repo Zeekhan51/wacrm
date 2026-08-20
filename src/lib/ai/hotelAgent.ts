@@ -689,6 +689,13 @@ export async function callLlm(
   }
   if (tools) body.tools = tools
 
+  // Debug: log sanitized request body (without tools to keep it readable)
+  const sanitizedBody = { ...body }
+  delete sanitizedBody.tools
+  console.log(
+    `[hotel agent] Request body (no tools) → ${JSON.stringify(sanitizedBody).slice(0, 1000)}`,
+  )
+
   // Gemini 2.5 Flash supports disabling thinking. Turning it off stops
   // internal reasoning from being generated at all, so it can never
   // leak into a guest-facing reply (and saves latency + tokens).
@@ -750,8 +757,10 @@ export async function callLlm(
 
     if (!res.ok) {
       let detail = ''
+      let rawBody = ''
       try {
-        const resBody = (await res.json()) as {
+        rawBody = await res.text()
+        const resBody = JSON.parse(rawBody) as {
           error?: { message?: string } | string
         }
         detail =
@@ -759,14 +768,12 @@ export async function callLlm(
             ? resBody.error
             : (resBody?.error?.message ?? '')
       } catch {
-        // Non-JSON (e.g. HTML error page) — read as text so the message
-        // is useful instead of "Unexpected token '<'".
-        try {
-          detail = await res.text()
-        } catch {
-          detail = res.statusText
-        }
+        // Non-JSON or parse failed — rawBody already has the text
+        detail = rawBody || res.statusText
       }
+      console.error(
+        `[hotel agent] ${llm.provider} API error (${res.status}) at ${llm.baseUrl} — full response: ${rawBody.slice(0, 2000)}`,
+      )
       throw new Error(
         `${llm.provider} API error (${res.status}) at ${llm.baseUrl}: ${detail || res.statusText}`,
       )
